@@ -4,6 +4,7 @@ import numpy as np
 import requests
 import pyfakewebcam
 import datetime
+from videocaptureasync import VideoCaptureAsync
 
 def get_mask(frame, bodypix_url='http://localhost:9000'):
     _, data = cv2.imencode(".jpg", frame)
@@ -87,6 +88,8 @@ try:
     parser = argparse.ArgumentParser(description='Virtual background fake webcam')
     parser.add_argument('-i', '--input', default='/dev/video0', help='real webcam device')
     parser.add_argument('-o', '--output', default='/dev/video20', help='loopback video device')
+    parser.add_argument('--width', default=640, help='video width')
+    parser.add_argument('--height', default=400, help='video height')
     parser.add_argument('--enable-hologram', action='store_true', help='enable hologram effect')
     parser.add_argument('background', default=['data/*'], nargs='*', help='background files (images or videos)')
     args = parser.parse_args()
@@ -94,16 +97,14 @@ try:
     # setup access to the *real* webcam
     print('Opening webcam', args.input, '...')
     cap = cv2.VideoCapture(args.input)
-    
-    #height, width = 720, 1280
-    height, width = 400, 640
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-    cap.set(cv2.CAP_PROP_FPS, 5)
+    #cap = VideoCaptureAsync(args.input, args.width, args.height)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+    cap.set(cv2.CAP_PROP_FPS, 25)
     
     # setup the fake camera
     print('Writing to loopback device', args.output, '...')
-    fake = pyfakewebcam.FakeWebcam(args.output, width, height)
+    fake = pyfakewebcam.FakeWebcam(args.output, args.width, args.height)
     
     # load the virtual background
     background_index = 0
@@ -125,12 +126,12 @@ try:
         background_filename = background_filenames[background_index % len(background_filenames)]
 
         print("Loading background", background_filename)
-        bg_cap = cv2.VideoCapture(background_filename)
         try:
             bg_cap = cv2.VideoCapture(background_filename)
+            #bg_cap = VideoCaptureAsync(background_filename, args.width, args.height)
         except:
             background = cv2.imread(background_filename)
-            background = cv2.resize(background, (width, height))
+            background = cv2.resize(background, (args.width, args.height))
 
         background_index += 1
 
@@ -145,6 +146,7 @@ try:
             change_background()
             now = datetime.datetime.now()
 
+        # Capture background
         if bg_cap:
             _, new_background = bg_cap.read()
 
@@ -154,17 +156,19 @@ try:
                 _, new_background = bg_cap.read()
 
             if new_background is not None:
-                background = cv2.resize(new_background, (width, height))
-    
+                background = cv2.resize(new_background, (args.width, args.height))
+   
+        # Capture webcam 
         nframe += 1
         if frame is None or nframe > 5:
             nframe = 0
-
             _, frame = cap.read()
-    
             mask = mask_frame(frame)
+        else:
+            cap.read()
 
-        if background is not None and mask is not None:
+        # Blend webcam image into background
+        if background is not None and frame is not None and mask is not None:
             final_frame = frame.copy()
             if args.enable_hologram:
                 final_frame = hologram_effect(final_frame)
