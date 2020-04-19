@@ -9,3 +9,14 @@ I just fetched a Open Source Virtual Background experiment from https://elder.de
   * Reduced the resolution
 * Improved the hologram effect adding some subtle animation to the scanlines
 * Added more backgrounds, and made the backgrounds change automatically every minute
+
+## How to setup and run
+
+* Without docker:
+```
+./run.sh
+```
+* With docker:
+```
+./run_docker.sh
+```
