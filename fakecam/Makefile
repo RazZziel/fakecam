@@ -1,5 +1,5 @@
 all: .venv /dev/video20
-	.venv/bin/python fake.py
+	.venv/bin/python fake.py $$ARGS
 
 .venv:
 	virtualenv .venv

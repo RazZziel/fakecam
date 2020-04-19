@@ -4,7 +4,6 @@ import numpy as np
 import requests
 import pyfakewebcam
 import datetime
-import glob
 
 def get_mask(frame, bodypix_url='http://localhost:9000'):
     _, data = cv2.imencode(".jpg", frame)
@@ -37,7 +36,7 @@ def shift_image(img, dx, dy):
 t = 0
 def hologram_effect(img):
     global t
-    t = t + 3
+    t += 3
     # add a blue tint
     holo = cv2.applyColorMap(img, cv2.COLORMAP_WINTER)
     # add a halftone effect
@@ -52,10 +51,9 @@ def hologram_effect(img):
     out = cv2.addWeighted(img, 0.5, holo_blur, 0.6, 0)
     return out
 
-def get_frame(cap, background):
-    _, frame = cap.read()
-    # fetch the mask with retries (the app needs to warmup and we're lazy)
-    # e v e n t u a l l y c o n s i s t e n t
+# fetch the mask with retries (the app needs to warmup and we're lazy)
+# e v e n t u a l l y c o n s i s t e n t
+def mask_frame(frame):
     mask = None
     while mask is None:
         try:
@@ -64,54 +62,118 @@ def get_frame(cap, background):
             raise
         except:
             print("mask request failed, retrying")
+
     # post-process mask and frame
-    mask = post_process_mask(mask)
-    frame = hologram_effect(frame)
-    # composite the foreground and background
-    inv_mask = 1-mask + 0.1*mask
+    return post_process_mask(mask)
+
+# composite the foreground and background
+def blend_frame(frame, background, mask):
+    inv_mask = 1-mask
+    if args.enable_hologram:
+        inv_mask += 0.1*mask
+    result = frame
     for c in range(frame.shape[2]):
-        frame[:,:,c] = frame[:,:,c]*mask + background[:,:,c]*inv_mask
-#         frame[:,:,c] = frame[:,:,c]*mask
-    #frame = cv2.bitwise_and(frame, frame, mask=mask)
-    #background, = cv2.bitwise_and(background, background, mask=inv_mask)
-    #frame = cv2.add(background, frame)
-    #frame = cv2.addWeighted(background, 0.6, frame, 1, 0)
-    return frame
+        result[:,:,c] = frame[:,:,c]*mask + background[:,:,c]*inv_mask
+        #result[:,:,c] = frame[:,:,c]*mask
+    #result = cv2.bitwise_and(frame, frame, mask=mask)
+    #background = cv2.bitwise_and(background, background, mask=inv_mask)
+    #result = cv2.add(background, result)
+    #result = cv2.addWeighted(background, 0.6, result, 1, 0)
 
-# setup access to the *real* webcam
-cap = cv2.VideoCapture('/dev/video0')
-#height, width = 720, 1280
-height, width = 400, 640
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-cap.set(cv2.CAP_PROP_FPS, 5)
+    return result
 
-# setup the fake camera
-fake = pyfakewebcam.FakeWebcam('/dev/video20', width, height)
+try:
+    import argparse
+    parser = argparse.ArgumentParser(description='Virtual background fake webcam')
+    parser.add_argument('-i', '--input', default='/dev/video0', help='real webcam device')
+    parser.add_argument('-o', '--output', default='/dev/video20', help='loopback video device')
+    parser.add_argument('--enable-hologram', action='store_true', help='enable hologram effect')
+    parser.add_argument('background', default=['data/*'], nargs='*', help='background files (images or videos)')
+    args = parser.parse_args()
+    
+    # setup access to the *real* webcam
+    print('Opening webcam', args.input, '...')
+    cap = cv2.VideoCapture(args.input)
+    
+    #height, width = 720, 1280
+    height, width = 400, 640
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    cap.set(cv2.CAP_PROP_FPS, 5)
+    
+    # setup the fake camera
+    print('Writing to loopback device', args.output, '...')
+    fake = pyfakewebcam.FakeWebcam(args.output, width, height)
+    
+    # load the virtual background
+    background_index = 0
+    background = None
+    bg_cap = None
+    
+    import glob
+    background_filenames = []
+    for background_filename in args.background:
+        background_filenames += glob.glob(background_filename)
+    if len(background_filenames) == 0:
+        print("No background files found on", args.background)
+        exit(1)
 
-# load the virtual background
-background_id = 0
-background = None
+    def change_background():
+        global background_index
+        global background
+        global bg_cap
+        background_filename = background_filenames[background_index % len(background_filenames)]
 
-def change_background():
-    global background_id
-    global background
-    background_filenames = glob.glob("data/background*.jpg")
-    background_filename = background_filenames[background_id % len(background_filenames)]
-    print("Loading background", background_filename)
-    background = cv2.imread(background_filename)
-    background = cv2.resize(background, (width, height))
-    background_id = background_id + 1
-change_background()
+        print("Loading background", background_filename)
+        bg_cap = cv2.VideoCapture(background_filename)
+        try:
+            bg_cap = cv2.VideoCapture(background_filename)
+        except:
+            background = cv2.imread(background_filename)
+            background = cv2.resize(background, (width, height))
 
-# frames forever
-now = datetime.datetime.now()
-while True:
-    frame = get_frame(cap, background)
-    # fake webcam expects RGB
-    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    fake.schedule_frame(frame)
+        background_index += 1
 
-    if datetime.datetime.now() - now > datetime.timedelta(minutes=1):
-        change_background()
-        now = datetime.datetime.now()
+    now = datetime.datetime.now()
+    nframe = 1
+    frame = None
+    mask = None
+    
+    # frames forever
+    while True:
+        if background is None or datetime.datetime.now() - now > datetime.timedelta(minutes=1):
+            change_background()
+            now = datetime.datetime.now()
+
+        if bg_cap:
+            _, new_background = bg_cap.read()
+
+            if new_background is None:
+                # Try to loop back to the beginning
+                bg_cap.set(cv2.CAP_PROP_POS_FRAMES, 1)
+                _, new_background = bg_cap.read()
+
+            if new_background is not None:
+                background = cv2.resize(new_background, (width, height))
+    
+        nframe += 1
+        if frame is None or nframe > 5:
+            nframe = 0
+
+            _, frame = cap.read()
+    
+            mask = mask_frame(frame)
+
+        if background is not None and mask is not None:
+            final_frame = frame.copy()
+            if args.enable_hologram:
+                final_frame = hologram_effect(final_frame)
+
+            final_frame = blend_frame(final_frame, background, mask)
+    
+            # fake webcam expects RGB
+            final_frame = cv2.cvtColor(final_frame, cv2.COLOR_BGR2RGB)
+            fake.schedule_frame(final_frame)
+    
+except KeyboardInterrupt:
+    exit(0)

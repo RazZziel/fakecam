@@ -7,8 +7,9 @@ I just fetched a Open Source Virtual Background experiment from https://elder.de
   * Disabled GPU
   * Reduced the framerate
   * Reduced the resolution
-* Improved the hologram effect adding some subtle animation to the scanlines
-* Added more backgrounds, and made the backgrounds change automatically every minute
+* Improved the hologram effect adding a subtle animation to the scanlines and some of transparency
+* Added more backgrounds, implemented video backgrounds, and made the backgrounds change automatically every minute
+* Implemented command parameters to specify video devices, background paths, etc
 
 ## How to setup and run
 
