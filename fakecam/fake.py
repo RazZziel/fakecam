@@ -6,15 +6,57 @@ import pyfakewebcam
 import datetime
 from videocaptureasync import VideoCaptureAsync
 
-def get_mask(frame, bodypix_url='http://localhost:9000'):
-    _, data = cv2.imencode(".jpg", frame)
-    r = requests.post(
-        url=bodypix_url,
-        data=data.tobytes(),
-        headers={'Content-Type': 'application/octet-stream'})
-    mask = np.frombuffer(r.content, dtype=np.uint8)
-    mask = mask.reshape((frame.shape[0], frame.shape[1]))
+# fetch the mask with retries (the app needs to warmup and we're lazy)
+# e v e n t u a l l y c o n s i s t e n t
+def get_mask_bodypix(frame, bodypix_url='http://localhost:9000'):
+    mask = None
+    while mask is None:
+        try:
+            _, data = cv2.imencode(".jpg", frame)
+            r = requests.post(
+                url=bodypix_url,
+                data=data.tobytes(),
+                headers={'Content-Type': 'application/octet-stream'})
+            mask = np.frombuffer(r.content, dtype=np.uint8)
+            mask = mask.reshape((frame.shape[0], frame.shape[1]))
+        except KeyboardInterrupt:
+            raise
+        except:
+            print("mask request failed, retrying")
     return mask
+
+def get_mask_tf(frame):
+    input_height = input_details[0]['shape'][1]
+    input_width = input_details[0]['shape'][2]
+
+    img = cv2.resize(frame, (input_width, input_height))
+
+    # add N dim
+    input_data = np.expand_dims(img, axis=0)
+
+    # check the type of the input tensor
+    floating_model = input_details[0]['dtype'] == np.float32
+    if floating_model:
+        input_data = (np.float32(input_data) - args.input_mean) / args.input_std
+
+    interpreter.set_tensor(input_details[0]['index'], input_data)
+
+    interpreter.invoke()
+
+    output_data = interpreter.get_tensor(output_details[0]['index'])
+    results = np.squeeze(output_data)
+
+    # find the highest-probability class for each pixel (along axis 2)
+    out = np.apply_along_axis(np.argmax,2,results)
+
+    # category labels for deeplabv3_257_mv_gpu.tflite
+    labels = [ "background", "aeroplane", "bicycle", "bird", "boat", "bottle", "bus", "car", "cat", "chair", "cow", "dining table", "dog", "horse", "motorbike", "person", "potted plant", "sheep", "sofa", "train", "tv" ]
+
+    # set pixels with likeliest class == person to 1
+    pers_idx = labels.index("person")
+    person = np.where(out == pers_idx, 1, 0).astype(np.uint8)
+
+    return cv2.resize(person, (frame.shape[1], frame.shape[0]))
 
 def post_process_mask(mask):
     mask = cv2.dilate(mask, np.ones((10,10), np.uint8) , iterations=1)
@@ -52,17 +94,9 @@ def hologram_effect(img):
     out = cv2.addWeighted(img, 0.5, holo_blur, 0.6, 0)
     return out
 
-# fetch the mask with retries (the app needs to warmup and we're lazy)
-# e v e n t u a l l y c o n s i s t e n t
 def mask_frame(frame):
-    mask = None
-    while mask is None:
-        try:
-            mask = get_mask(frame)
-        except KeyboardInterrupt:
-            raise
-        except:
-            print("mask request failed, retrying")
+    #mask = get_mask_tf(frame)
+    mask = get_mask_bodypix(frame)
 
     # post-process mask and frame
     return post_process_mask(mask)
@@ -92,19 +126,32 @@ try:
     parser.add_argument('--height', default=400, help='video height')
     parser.add_argument('--enable-hologram', action='store_true', help='enable hologram effect')
     parser.add_argument('background', default=['data/*'], nargs='*', help='background files (images or videos)')
+
+    parser.add_argument( '-m', '--model', default='deeplabv3_257_mv_gpu.tflite', help='.tflite model to be executed')
+    parser.add_argument('--input_mean', default=127.5, type=float, help='input_mean')
+    parser.add_argument('--input_std', default=127.5, type=float, help='input standard deviation')
+
     args = parser.parse_args()
-    
+   
+    import tensorflow as tf
+    interpreter = tf.lite.Interpreter(model_path=args.model)
+    interpreter.allocate_tensors()
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+ 
     # setup access to the *real* webcam
     print('Opening webcam', args.input, '...')
-    cap = cv2.VideoCapture(args.input)
-    #cap = VideoCaptureAsync(args.input, args.width, args.height)
+    #cap = cv2.VideoCapture(args.input)
+    cap = VideoCaptureAsync(args.input, args.width, args.height)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
     cap.set(cv2.CAP_PROP_FPS, 25)
     
     # setup the fake camera
-    print('Writing to loopback device', args.output, '...')
-    fake = pyfakewebcam.FakeWebcam(args.output, args.width, args.height)
+    fake = None
+    if args.output != "imshow":
+        print('Writing to loopback device', args.output, '...')
+        fake = pyfakewebcam.FakeWebcam(args.output, args.width, args.height)
     
     # load the virtual background
     background_index = 0
@@ -174,10 +221,14 @@ try:
                 final_frame = hologram_effect(final_frame)
 
             final_frame = blend_frame(final_frame, background, mask)
-    
-            # fake webcam expects RGB
-            final_frame = cv2.cvtColor(final_frame, cv2.COLOR_BGR2RGB)
-            fake.schedule_frame(final_frame)
+
+            if fake:
+                # fake webcam expects RGB
+                final_frame = cv2.cvtColor(final_frame, cv2.COLOR_BGR2RGB)
+                fake.schedule_frame(final_frame)
+            else:
+                cv2.imshow("mask", final_frame)
+                cv2.waitKey(1)
     
 except KeyboardInterrupt:
     exit(0)
